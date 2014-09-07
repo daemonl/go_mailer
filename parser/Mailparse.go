@@ -111,20 +111,13 @@ func main() {
 
 	fmt.Printf("Unsubscribe code: %s\n", unique)
 
-	/*
-		err := getMessages(sv, userId, "Label_2", parseUnsubscribe)
-		if err != nil {
-			fmt.Printf("Error fetching: %s\n", err.Error())
-			os.Exit(1)
-		}
-	*/
-	// Label_3 == failed
 	req := sv.Users.Messages.List(userId).LabelIds("INBOX").Q("subject:unsubscribe")
 	err = getMessages(req, parseUnsubscribe)
 	if err != nil {
 		fmt.Printf("Error fetching: %s\n", err.Error())
 		os.Exit(1)
 	}
+
 	/*
 		req := sv.Users.Messages.List(userId).LabelIds("INBOX")
 		err = getMessages(req, parseDeliveryFail)
