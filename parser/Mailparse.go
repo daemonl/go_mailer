@@ -1,13 +1,9 @@
-package main
+package parser
 
 import (
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
-	"os"
 	"regexp"
 
 	"code.google.com/p/goauth2/oauth"
@@ -16,55 +12,13 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-var configFilename string
-
-var db *sql.DB
-var sv *gmail.Service
-var userId string
-var labels map[string]string
-
-func init() {
-	flag.StringVar(&configFilename, "config", "config.json", "The filename to load json config from")
+type Parser struct {
+	db     *sql.DB
+	sv     *gmail.Service
+	config *Config
 }
 
-type Config struct {
-	OAuth struct {
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		RedirectURL  string `json:"redirectURL"`
-		TokenFile    string `json:"tokenFile"`
-	} `json:"oauth"`
-	UserID     string            `json:"userId"`
-	DSN        string            `json:"dsn"`
-	Labels     map[string]string `json:"labels"`
-	ServerBind string            `json:"serverBind"`
-	Table      string            `json:"recipientTable"`
-}
-
-func setup() error {
-	flag.Parse()
-
-	var configReader io.Reader
-	var err error
-
-	config := &Config{}
-
-	if configFilename == "-" {
-		configReader = os.Stdin
-	} else {
-		configReader, err = os.Open(configFilename)
-		if err != nil {
-			return err
-		}
-	}
-	decoder := json.NewDecoder(configReader)
-	err = decoder.Decode(config)
-	if err != nil {
-		return err
-	}
-
-	userId = config.UserID
-	labels = config.Labels
+func GetParser(config *Config) (*Parser, error) {
 
 	oauthConfig := &oauth.Config{
 		ClientId:     config.OAuth.ClientID,
@@ -77,61 +31,60 @@ func setup() error {
 		TokenCache:   oauth.CacheFile(config.OAuth.TokenFile),
 	}
 
-	db, err = sql.Open("mysql", config.DSN)
+	db, err := sql.Open("mysql", config.DSN)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	transport, err := goauthcli.GetTransport(oauthConfig, config.ServerBind)
 
-	sv, err = gmail.New(transport.Client())
+	sv, err := gmail.New(transport.Client())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return &Parser{
+		db:     db,
+		sv:     sv,
+		config: config,
+	}, nil
 }
 
-func main() {
-
-	err := setup()
+func (p *Parser) ListLabels() error {
+	labels, err := p.sv.Users.Labels.List(p.config.UserID).Do()
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-
-	labels, err := sv.Users.Labels.List(userId).Do()
-	if err != nil {
-		fmt.Printf("Error authenticating: %s\n", err.Error())
-		os.Exit(1)
+		return err
 	}
 	for _, label := range labels.Labels {
 		fmt.Printf("%s: %s\n", label.Id, label.Name)
 	}
+	return nil
+}
 
-	fmt.Printf("Unsubscribe code: %s\n", unique)
-
-	req := sv.Users.Messages.List(userId).LabelIds("INBOX").Q("subject:unsubscribe")
-	err = getMessages(req, parseUnsubscribe)
+func (p *Parser) ParseUnsubscribes() error {
+	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX").Q("subject:unsubscribe")
+	err := p.GetMessages(req, p.HandleUnsubscribe)
 	if err != nil {
-		fmt.Printf("Error fetching: %s\n", err.Error())
-		os.Exit(1)
+		return err
 	}
+	return nil
+}
 
-	/*
-		req := sv.Users.Messages.List(userId).LabelIds("INBOX")
-		err = getMessages(req, parseDeliveryFail)
-		if err != nil {
-			fmt.Printf("Error fetching: %s\n", err.Error())
-			os.Exit(1)
-		}*/
+func (p *Parser) ParseFailures() error {
+
+	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX")
+	err := p.GetMessages(req, p.HandleDeliveryStatus)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 var reSentTo *regexp.Regexp = regexp.MustCompile(`This email was sent to [^\(]*\(([^@]*@[^\)< ]*)`)
 var reStatusAction *regexp.Regexp = regexp.MustCompile(`[Aa]ction: ([a-z]*)`)
 var reStatusRecipient *regexp.Regexp = regexp.MustCompile(`[fF]inal[-_][rR]ecipient:[^;]*; ?<?([^@]*@[a-zA-Z0-9\-\.\_]*)`)
 
-func parseUnsubscribe(message *gmail.Message) error {
+func (p *Parser) HandleUnsubscribe(message *gmail.Message) error {
 
 	body, err := getMimePartString(message, "text/plain")
 	if err != nil {
@@ -150,11 +103,11 @@ func parseUnsubscribe(message *gmail.Message) error {
 	body = reReplyNewline.ReplaceAllString(body, "")
 	sentTo := reSentTo.FindStringSubmatch(body)
 	if len(sentTo) > 0 {
-		err = unsubscribe(sentTo[1])
+		err = p.Unsubscribe(sentTo[1])
 		if err != nil {
 			return err
 		}
-		moveMessage(message, "INBOX", labels["unsubscribe"])
+		p.MoveMessage(message, "INBOX", p.config.Labels["unsubscribe"])
 		return nil
 	} else {
 		return fmt.Errorf("Message %s had no parseable address\n", message.Id)
@@ -162,12 +115,13 @@ func parseUnsubscribe(message *gmail.Message) error {
 	return nil
 }
 
-func moveMessage(m *gmail.Message, from string, to string) {
+func (p *Parser) MoveMessage(m *gmail.Message, from string, to string) {
+
 	req := &gmail.ModifyMessageRequest{
 		RemoveLabelIds: []string{from},
 		AddLabelIds:    []string{to},
 	}
-	_, err := sv.Users.Messages.Modify(userId, m.Id, req).Do()
+	_, err := p.sv.Users.Messages.Modify(p.config.UserID, m.Id, req).Do()
 	if err != nil {
 		fmt.Printf("Could not move message %s: %s\n", m.Id, err.Error())
 	} else {
@@ -175,7 +129,7 @@ func moveMessage(m *gmail.Message, from string, to string) {
 	}
 }
 
-func parseDeliveryFail(m *gmail.Message) error {
+func (p *Parser) HandleDeliveryStatus(m *gmail.Message) error {
 	body, err := getMimePartString(m, "message/delivery-status")
 	if err != nil {
 		return err
@@ -192,8 +146,8 @@ func parseDeliveryFail(m *gmail.Message) error {
 		return fmt.Errorf("=================================")
 	}
 	if action[1] == "failed" {
-		moveMessage(m, "INBOX", labels["undeliverable"])
-		err = undeliverable(recipient[1])
+		p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
+		err = p.Undeliverable(recipient[1])
 		if err != nil {
 			return err
 		}
@@ -220,10 +174,7 @@ func getMimePartString(message *gmail.Message, mimeType string) (string, error) 
 
 var reReplyNewline *regexp.Regexp = regexp.MustCompile(`\n>[ ]*`)
 
-func getMessages(listRequest *gmail.UsersMessagesListCall, msgCallback func(*gmail.Message) error) error {
-
-	//req := sv.Users.Messages.List(userId)
-	//.LabelIds(label)
+func (p *Parser) GetMessages(listRequest *gmail.UsersMessagesListCall, msgCallback func(*gmail.Message) error) error {
 
 	resp, err := listRequest.Do()
 	if err != nil {
@@ -231,7 +182,7 @@ func getMessages(listRequest *gmail.UsersMessagesListCall, msgCallback func(*gma
 	}
 	for {
 		for _, mHeader := range resp.Messages {
-			message, err := sv.Users.Messages.Get(userId, mHeader.Id).Format("full").Do()
+			message, err := p.sv.Users.Messages.Get(p.config.UserID, mHeader.Id).Format("full").Do()
 			if err != nil {
 				return err
 			}
@@ -247,7 +198,7 @@ func getMessages(listRequest *gmail.UsersMessagesListCall, msgCallback func(*gma
 		}
 		newReq := listRequest.PageToken(resp.NextPageToken)
 		resp, err = newReq.Do()
-		//sv.Users.Messages.List(userId).LabelIds(label).PageToken(resp.NextPageToken).Do()
+		//sv.Users.Messages.List(p.config.UserID).LabelIds(label).PageToken(resp.NextPageToken).Do()
 		if err != nil {
 			return err
 		}

@@ -1,4 +1,4 @@
-package main
+package parser
 
 import (
 	"fmt"
@@ -7,19 +7,19 @@ import (
 
 var unique string = fmt.Sprintf("%d", time.Now().Unix())
 
-func undeliverable(addr string) error {
+func (p *Parser) Undeliverable(addr string) error {
 	fmt.Printf("FAIL: %s %s\n", addr, unique)
-	return doAddress(addr, "fail")
+	return p.DoAddress(addr, "fail")
 }
 
-func unsubscribe(addr string) error {
+func (p *Parser) Unsubscribe(addr string) error {
 	fmt.Printf("UNSUBSCRIBE: %s %s\n", addr, unique)
-	return doAddress(addr, "unsubscribe")
+	return p.DoAddress(addr, "unsubscribe")
 }
 
-func doAddress(addr, col string) error {
+func (p *Parser) DoAddress(addr, col string) error {
 	unique := time.Now().String()
-	res, err := db.Exec(fmt.Sprintf(`UPDATE sendlist SET %s = ? WHERE email = ?`, col), unique, addr)
+	res, err := p.db.Exec(fmt.Sprintf(`UPDATE sendlist SET %s = ? WHERE email = ?`, col), unique, addr)
 	if err != nil {
 		return err
 	}
@@ -30,7 +30,7 @@ func doAddress(addr, col string) error {
 	if rows == 1 {
 		fmt.Printf("Marked %s as %s in the DB\n", addr, col)
 	} else {
-		_, err := db.Exec(fmt.Sprintf(`INSERT INTO sendlist (email, %s) VALUES (?, ?)`, col), addr, unique)
+		_, err := p.db.Exec(fmt.Sprintf(`INSERT INTO sendlist (email, %s) VALUES (?, ?)`, col), addr, unique)
 		if err != nil {
 			return fmt.Errorf("No update and error %s: %s\n", addr, err.Error())
 		} else {

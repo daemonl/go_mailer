@@ -1,18 +1,16 @@
-package main
+package mailer
 
 import (
+	"crypto/md5"
 	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
 	"net/smtp"
 	"net/textproto"
-	"os"
 	"strings"
 
 	"github.com/daemonl/go_sweetpl"
@@ -26,141 +24,95 @@ type EmailData struct {
 	Email     *string
 }
 
-var configFilename string
-var tpl *sweetpl.SweeTpl
-var config *Config
-var tlsConfig *tls.Config
-var simpleAuth smtp.Auth
-var db *sql.DB
-
-func init() {
-	flag.StringVar(&configFilename, "config", "config.json", "The filename to load json config from")
+type Mailer struct {
+	tpl        *sweetpl.SweeTpl
+	config     *Config
+	tlsConfig  *tls.Config
+	simpleAuth smtp.Auth
+	db         *sql.DB
 }
 
-func setup() (*Config, error) {
+func GetMailer(config *Config) (*Mailer, error) {
 
-	flag.Parse()
+	simpleAuth := smtp.PlainAuth("", config.SMTP.Username, config.SMTP.Password, config.SMTP.Hello)
 
-	var configReader io.Reader
-	var err error
-
-	config := &Config{}
-
-	if configFilename == "-" {
-		configReader = os.Stdin
-	} else {
-		configReader, err = os.Open(configFilename)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	decoder := json.NewDecoder(configReader)
-	err = decoder.Decode(config)
-	if err != nil {
-		return nil, err
-	}
-
-	simpleAuth = smtp.PlainAuth("", config.SMTP.Username, config.SMTP.Password, config.SMTP.Hello)
-
-	tlsConfig = &tls.Config{
+	tlsConfig := &tls.Config{
 		ServerName: config.SMTP.Hello,
 	}
-	db, err = sql.Open("mysql", config.DSN)
+
+	db, err := sql.Open("mysql", config.DSN)
 	if err != nil {
 		return nil, err
 	}
 
-	return config, nil
-
-}
-
-func main() {
-	var err error
-	config, err = setup()
-	if err != nil {
-		fmt.Printf("Error authenticating: %s\n", err.Error())
-		os.Exit(1)
-		return
-	}
-
-	tpl = &sweetpl.SweeTpl{
+	tpl := &sweetpl.SweeTpl{
 		Loader: &sweetpl.DirLoader{
 			BasePath: config.TemplatePath,
 		},
 	}
 
-	err = doMailLoop()
-	if err != nil {
-		fmt.Printf("Error in loop: %s\n", err.Error())
-		os.Exit(1)
-		return
-	}
+	return &Mailer{
+		tpl:        tpl,
+		config:     config,
+		tlsConfig:  tlsConfig,
+		simpleAuth: simpleAuth,
+		db:         db,
+	}, nil
 }
 
-func getSmtpClient() (*smtp.Client, error) {
-	log.Printf("Dial %s\n", config.SMTP.Server)
-	smtpClient, err := smtp.Dial(config.SMTP.Server)
+func (m *Mailer) getSmtpClient() (*smtp.Client, error) {
+
+	log.Printf("Dial %s\n", m.config.SMTP.Server)
+	smtpClient, err := smtp.Dial(m.config.SMTP.Server)
 	if err != nil {
 		return nil, err
 	}
-	if err := smtpClient.Hello(config.SMTP.Hello); err != nil {
+	if err := smtpClient.Hello(m.config.SMTP.Hello); err != nil {
 		return nil, err
 	}
 	log.Println("STARTTLS")
-	if err := smtpClient.StartTLS(tlsConfig); err != nil {
+	if err := smtpClient.StartTLS(m.tlsConfig); err != nil {
 		return nil, err
 	}
-	/*
-		if err := smtpClient.Hello(config.SMTP.Hello); err != nil {
-			return nil, err
-		}*/
-
-	if err := smtpClient.Auth(simpleAuth); err != nil {
+	if err := smtpClient.Auth(m.simpleAuth); err != nil {
 		return nil, fmt.Errorf("AUTH: %s", err.Error())
 	}
 	log.Println("SMTP Client Connected")
 	return smtpClient, nil
 }
 
-func doMailLoop() error {
+func (m *Mailer) DoMailLoop() error {
 
-	smtpClient, err := getSmtpClient()
-	if err != nil {
-		return fmt.Errorf("Creating SMTP Client: %s", err.Error())
-	}
-
-	res, err := db.Query(fmt.Sprintf(`
+	res, err := m.db.Query(fmt.Sprintf(`
 	SELECT id, first, last, email 
 	FROM %s
 	WHERE send1 IS NULL
 	AND unsubscribe IS NULL
-	AND fail IS NULL`, config.Table))
+	AND fail IS NULL`, m.config.Table))
 
 	if err != nil {
 		return err
+	}
+
+	smtpClient, err := m.getSmtpClient()
+	if err != nil {
+		return fmt.Errorf("Creating SMTP Client: %s", err.Error())
 	}
 
 	var numberSent int = 0
 	for res.Next() {
 
 		if numberSent > 10 {
-			// Establish new smtp client.
-
+			// Establish new smtp client for every 10 emails. Just in case.
 			if err := smtpClient.Quit(); err != nil {
 				return fmt.Errorf("Quit: %s", err.Error())
 			}
-			/*
-				if err := smtpClient.Close(); err != nil {
-					return fmt.Errorf("Close: %s", err.Error())
-				}*/
-			smtpClient, err = getSmtpClient()
+			smtpClient, err = m.getSmtpClient()
 			if err != nil {
 				return fmt.Errorf("GET Client: %s", err.Error())
 			}
 			numberSent = 0
 		}
-
 		numberSent++
 
 		data := &EmailData{}
@@ -170,19 +122,19 @@ func doMailLoop() error {
 			log.Println(err.Error())
 			continue
 		}
-		_, err = db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 1 WHERE id = ?`, config.Table), data.ID)
+		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 1 WHERE id = ?`, m.config.Table), data.ID)
 		if err != nil {
 			log.Println(err.Error())
 			continue
 		}
 
-		err = doMail(smtpClient, data)
+		err = m.sendEmail(smtpClient, data)
 		if err != nil {
 			log.Println(err.Error())
 			continue
 		}
 
-		_, err = db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 2 WHERE id = ?`, config.Table), data.ID)
+		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 2 WHERE id = ?`, m.config.Table), data.ID)
 		if err != nil {
 			log.Println(err.Error())
 			continue
@@ -194,16 +146,19 @@ func doMailLoop() error {
 	return nil
 }
 
-func doMail(smtpClient *smtp.Client, data *EmailData) error {
+func (m *Mailer) sendEmail(smtpClient *smtp.Client, data *EmailData) error {
+
 	if err := smtpClient.Reset(); err != nil {
 		return err
 	}
+
 	if data.Email == nil {
 		return fmt.Errorf("NO Email address for %d", data.ID)
 	}
+
 	log.Printf("SEND TO %s\n", *data.Email)
 
-	if err := smtpClient.Mail(config.SMTP.From); err != nil {
+	if err := smtpClient.Mail(m.config.SMTP.From); err != nil {
 		return err
 	}
 	if err := smtpClient.Rcpt(*data.Email); err != nil {
@@ -214,10 +169,11 @@ func doMail(smtpClient *smtp.Client, data *EmailData) error {
 		return err
 	}
 
-	err = doEmail(writer, data) //writer, data)
+	err = m.writeEmail(writer, data) //writer, data)
 	if err != nil {
 		return err
 	}
+
 	err = writer.Close()
 	if err != nil {
 		return err
@@ -225,21 +181,25 @@ func doMail(smtpClient *smtp.Client, data *EmailData) error {
 	return nil
 }
 
-func doEmail(w io.Writer, data *EmailData) error {
+func (m *Mailer) writeEmail(w io.Writer, data *EmailData) error {
 
 	var err error
 
 	mw := multipart.NewWriter(w)
 
-	unsubscribe := config.ListUnsubscribe
+	unsubscribe := m.config.ListUnsubscribe
 	if strings.Contains(unsubscribe, "%s") {
+		hashWriter := md5.New()
+		fmt.Fprintf(hashWriter, "%s%d%s", *data.Email, data.ID, m.config.UnsubscribeSecret)
 		b64e := base64.URLEncoding.EncodeToString([]byte(*data.Email))
+		b64e += "-"
+		b64e += base64.URLEncoding.EncodeToString(hashWriter.Sum(nil))
 		unsubscribe = fmt.Sprintf(unsubscribe, b64e)
 	}
 	headers := map[string]string{
-		"From":             config.From, //`"OSMAD" <info@osmad.com.au>`,
+		"From":             m.config.From, //`"OSMAD" <info@osmad.com.au>`,
 		"To":               *data.Email,
-		"Subject":          config.Subject,
+		"Subject":          m.config.Subject,
 		"List-Unsubscribe": unsubscribe,
 		"MIME-Version":     "1.0",
 		"Content-Type":     `multipart/alternative; boundary="` + mw.Boundary() + `"`,
@@ -259,7 +219,7 @@ func doEmail(w io.Writer, data *EmailData) error {
 		return err
 	}
 
-	err = tpl.Render(textPart, config.TextTemplate, data)
+	err = m.tpl.Render(textPart, m.config.TextTemplate, data)
 	if err != nil {
 		return err
 	}
@@ -271,7 +231,7 @@ func doEmail(w io.Writer, data *EmailData) error {
 		return err
 	}
 
-	err = tpl.Render(htmlPart, config.EmailTemplate, data)
+	err = m.tpl.Render(htmlPart, m.config.EmailTemplate, data)
 	if err != nil {
 		return err
 	}
