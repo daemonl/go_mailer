@@ -94,6 +94,7 @@ func (p *Parser) ParseFailures() error {
 var reSentTo *regexp.Regexp = regexp.MustCompile(`This email was sent to [^\(]*\(([^@]*@[^\)< ]*)`)
 var reStatusAction *regexp.Regexp = regexp.MustCompile(`[Aa]ction: ([a-z]*)`)
 var reStatusRecipient *regexp.Regexp = regexp.MustCompile(`[fF]inal[-_][rR]ecipient:[^;]*; ?<?([^@]*@[a-zA-Z0-9\-\.\_]*)`)
+var reQmailFailure *regexp.Regexp = regexp.MustCompile(`^<([^@]*@[a-zA-Z0-9\-\.\_]*)>:`)
 
 func (p *Parser) HandleSubscribe(message *gmail.Message) error {
 	body, err := getMimePartString(message.Payload, "text/plain")
@@ -232,15 +233,20 @@ func (p *Parser) tryDeliveryStatus(m *gmail.Message) string {
 }
 
 func (p *Parser) tryPlaintext(m *gmail.Message) string {
-	return ""
-	/*
-		body, err := getMimePartString(m, "text/plain")
-		if err != nil {
-			fmt.Println(err.Error())
-			return ""
-		}
+
+	body, err := getMimePartString(m, "text/plain")
+	if err != nil {
+		fmt.Println(err.Error())
 		return ""
-	*/
+	}
+
+	if strings.HasPrefix(body, `Hi. This is the qmail-send program at`) {
+		addr := reQmailFailure.FindStringSubmatch(body)
+		if len(addr) > 1{
+			return addr[1]
+		}
+	}
+	return ""
 }
 func (p *Parser) tryXHeader(m *gmail.Message) string {
 
