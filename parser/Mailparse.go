@@ -83,7 +83,7 @@ func (p *Parser) ParseUnsubscribes() error {
 
 func (p *Parser) ParseFailures() error {
 
-	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX")
+	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX").Q(`subject:("Undeliverable" OR "(Failure)" OR "Returned Mail")`)
 	err := p.GetMessages(req, p.HandleDeliveryStatus)
 	if err != nil {
 		return err
@@ -96,7 +96,7 @@ var reStatusAction *regexp.Regexp = regexp.MustCompile(`[Aa]ction: ([a-z]*)`)
 var reStatusRecipient *regexp.Regexp = regexp.MustCompile(`[fF]inal[-_][rR]ecipient:[^;]*; ?<?([^@]*@[a-zA-Z0-9\-\.\_]*)`)
 
 func (p *Parser) HandleSubscribe(message *gmail.Message) error {
-	body, err := getMimePartString(message, "text/plain")
+	body, err := getMimePartString(message.Payload, "text/plain")
 	if err != nil {
 		return err
 	}
@@ -138,13 +138,13 @@ func (p *Parser) HandleSubscribe(message *gmail.Message) error {
 
 func (p *Parser) HandleUnsubscribe(message *gmail.Message) error {
 
-	body, err := getMimePartString(message, "text/plain")
+	body, err := getMimePartString(message.Payload, "text/plain")
 	if err != nil {
 		return err
 	}
 	if len(body) < 1 {
 		fmt.Println("No plaintext body, try html")
-		body, err := getMimePartString(message, "text/html")
+		body, err := getMimePartString(message.Payload, "text/html")
 		if err != nil {
 			return err
 		}
@@ -183,81 +183,77 @@ func (p *Parser) MoveMessage(m *gmail.Message, from string, to string) {
 	}
 }
 
-func (p *Parser) findHeader(m *gmail.Message, name string) (string, bool) {
+func (p *Parser) findHeader(m *gmail.MessagePart, name string) (string, bool) {
 	name = strings.ToLower(name)
-	for _, h := range m.Payload.Headers {
+	for _, h := range m.Headers {
 		if name == strings.ToLower(h.Name) {
 			return h.Value, true
 		}
+		//fmt.Printf("%s != %s\n", h.Name, name)
 	}
 	return "", false
 }
 
 func (p *Parser) HandleDeliveryStatus(m *gmail.Message) error {
 
-	addr = ""
+	addr := ""
 	if addr = p.tryXHeader(m); len(addr) > 0 {
 	} else if addr = p.tryDeliveryStatus(m); len(addr) > 0 {
 	} else if addr = p.tryPlaintext(m); len(addr) > 0 {
 	} else {
-		return fmt.Errorf("No method found an unsubscribe address")
+		return fmt.Errorf("No method found an undeliverable address")
 	}
 
 	p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
-	err := p.Undeliverable(failHeader)
+	err := p.Undeliverable(addr)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (p *parser) tryDeliveryStatus(m) string {
-	body, err := getMimePartString(m, "message/delivery-status")
+func (p *Parser) tryDeliveryStatus(m *gmail.Message) string {
+	payload, err := getMimePartFromPart(m.Payload, "message/delivery-status")
 	if err != nil {
 		log.Println(err.Error)
 		return ""
 	}
-	if len(body) < 1 {
-		fmt.Println(body)
+	log.Println("GOT ACTION DELIVERY STATUS")
+	plainTextPart, err := getMimePartString(payload, "text/plain")
+	if err != nil {
+		log.Println(err.Error)
 		return ""
 	}
-	action := reStatusAction.FindStringSubmatch(body)
-	recipient := reStatusRecipient.FindStringSubmatch(body)
-	if len(action) == 0 || len(recipient) == 0 {
-		fmt.Println("PARSE FAIL ::::::::")
-		fmt.Println(body)
-		fmt.Println("PARSE FAIL ========")
-		return "" //fmt.Errorf("=================================")
+	recipient := reStatusRecipient.FindStringSubmatch(plainTextPart)
+	if len(recipient) < 2 {
+		return ""
 	}
 	return recipient[1]
-
-	//if action[1] == "failed" {
-
-	//p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
-	//err = p.Undeliverable(recipient[1])
-	//if err != nil {
-	//}
-	//}
 }
 
-func (p *parser) tryPlaintext(m *gmail.Message) string {
-	body, err = getMimePartString(m, "text/plain")
-	if err != nil {
-		fmt.Println(err.Error())
+func (p *Parser) tryPlaintext(m *gmail.Message) string {
+	return ""
+	/*
+		body, err := getMimePartString(m, "text/plain")
+		if err != nil {
+			fmt.Println(err.Error())
+			return ""
+		}
 		return ""
-	}
-
+	*/
 }
-func (p *parser) tryXHeader(m *gmail.Message) string {
+func (p *Parser) tryXHeader(m *gmail.Message) string {
 
-	if failHeader, ok := p.findHeader(m, "X-Failed-Recipients"); ok {
+	if failHeader, ok := p.findHeader(m.Payload, "X-Failed-Recipients"); ok {
 		return failHeader
 	}
 	return ""
 }
 
 func getMimePartFromPart(payload *gmail.MessagePart, mimeType string) (*gmail.MessagePart, error) {
-	fmt.Printf("MIME: '%s'\n", payload.MimeType)
+	if payload == nil {
+		return nil, nil
+	}
 	if payload.MimeType == mimeType {
 		return payload, nil
 	}
@@ -274,16 +270,15 @@ func getMimePartFromPart(payload *gmail.MessagePart, mimeType string) (*gmail.Me
 
 }
 
-func getMimePartString(message *gmail.Message, mimeType string) (string, error) {
-	payload, err := getMimePartFromPart(message.Payload, mimeType)
+func getMimePartString(msgPayload *gmail.MessagePart, mimeType string) (string, error) {
+	payload, err := getMimePartFromPart(msgPayload, mimeType)
 	if err != nil {
 		return "", err
 	}
 	if payload == nil {
 		return "", nil
 	}
-
-	bodyBytes, err := base64.URLEncoding.DecodeString(message.Payload.Body.Data)
+	bodyBytes, err := base64.URLEncoding.DecodeString(payload.Body.Data)
 	return string(bodyBytes), err
 }
 
