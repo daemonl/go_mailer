@@ -86,11 +86,12 @@ func (m *Mailer) DoMailLoop() error {
 	res, err := m.db.Query(fmt.Sprintf(`
 	SELECT id, first, last, email 
 	FROM %s
-	WHERE send1 IS NULL
+	WHERE %s IS NULL
 	AND unsubscribe IS NULL
-	AND fail IS NULL`, m.config.Table))
+	AND fail IS NULL`, m.config.Table, m.config.Column))
 
 	if err != nil {
+		log.Println(err.Error())
 		return err
 	}
 
@@ -99,9 +100,9 @@ func (m *Mailer) DoMailLoop() error {
 		return fmt.Errorf("Creating SMTP Client: %s", err.Error())
 	}
 
+	log.Printf("Send Mail in %s where %s is null\n", m.config.Table, m.config.Column)
 	var numberSent int = 0
 	for res.Next() {
-
 		if numberSent > 10 {
 			// Establish new smtp client for every 10 emails. Just in case.
 			if err := smtpClient.Quit(); err != nil {
@@ -122,7 +123,7 @@ func (m *Mailer) DoMailLoop() error {
 			log.Println(err.Error())
 			continue
 		}
-		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 1 WHERE id = ?`, m.config.Table), data.ID)
+		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET %s = 1 WHERE id = ?`, m.config.Table, m.config.Column), data.ID)
 		if err != nil {
 			log.Println(err.Error())
 			continue
@@ -134,7 +135,7 @@ func (m *Mailer) DoMailLoop() error {
 			continue
 		}
 
-		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET send1 = 2 WHERE id = ?`, m.config.Table), data.ID)
+		_, err = m.db.Exec(fmt.Sprintf(`UPDATE %s SET %s = 2 WHERE id = ?`, m.config.Table, m.config.Column), data.ID)
 		if err != nil {
 			log.Println(err.Error())
 			continue

@@ -7,6 +7,7 @@ type Config struct {
 	MailServer        string `json:"mailServer"`
 	DSN               string `json:"dsn"`
 	Table             string `json:"recipientTable"`
+	Column            string `json:"sendCol"`
 	Subject           string `json:"subject"`
 	From              string `json:"from"`
 	UnsubscribeSecret string `json:"unsubscribeSecret"`

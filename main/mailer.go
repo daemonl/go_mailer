@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/daemonl/go_mailer/mailer"
@@ -32,8 +33,15 @@ func main() {
 		return
 	}
 
+	p, err := getParser()
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+		return
+	}
+
 	if function == "parse" {
-		err := parse()
+		err := parse(p)
 		if err != nil {
 			fmt.Println(err.Error())
 			os.Exit(1)
@@ -42,18 +50,35 @@ func main() {
 		return
 	}
 
+	if function == "list" {
+		err := p.ListLabels()
+		if err != nil {
+			fmt.Println(err.Error())
+			os.Exit(1)
+			return
+		}
+	}
+
 	fmt.Printf("No function %s\n", function)
 	os.Exit(2)
 	return
 }
 
-func parse() error {
+func getParser() (*parser.Parser, error) {
 	config := &parser.Config{}
 	err := readConfig(config)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	p, err := parser.GetParser(config)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func parse(p *parser.Parser) error {
+	err := p.ParseSubscribes()
 	if err != nil {
 		return err
 	}
@@ -79,11 +104,15 @@ func send() error {
 
 	m, err := mailer.GetMailer(config)
 	if err != nil {
+		log.Printf("E: %s\n", err.Error())
 		return err
 	}
 
+	log.Println("Do Mail Loop")
+
 	err = m.DoMailLoop()
 	if err != nil {
+
 		return err
 	}
 	return nil

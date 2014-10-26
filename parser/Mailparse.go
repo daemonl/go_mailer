@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"regexp"
+	"strings"
 
 	"code.google.com/p/goauth2/oauth"
 	"code.google.com/p/google-api-go-client/gmail/v1"
@@ -61,6 +63,15 @@ func (p *Parser) ListLabels() error {
 	return nil
 }
 
+func (p *Parser) ParseSubscribes() error {
+	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX").Q("subject:PRESENTER OPT IN EMAIL MESSAGE SUBJECT")
+	err := p.GetMessages(req, p.HandleSubscribe)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *Parser) ParseUnsubscribes() error {
 	req := p.sv.Users.Messages.List(p.config.UserID).LabelIds("INBOX").Q("subject:unsubscribe")
 	err := p.GetMessages(req, p.HandleUnsubscribe)
@@ -83,6 +94,47 @@ func (p *Parser) ParseFailures() error {
 var reSentTo *regexp.Regexp = regexp.MustCompile(`This email was sent to [^\(]*\(([^@]*@[^\)< ]*)`)
 var reStatusAction *regexp.Regexp = regexp.MustCompile(`[Aa]ction: ([a-z]*)`)
 var reStatusRecipient *regexp.Regexp = regexp.MustCompile(`[fF]inal[-_][rR]ecipient:[^;]*; ?<?([^@]*@[a-zA-Z0-9\-\.\_]*)`)
+
+func (p *Parser) HandleSubscribe(message *gmail.Message) error {
+	body, err := getMimePartString(message, "text/plain")
+	if err != nil {
+		return err
+	}
+	if len(body) < 1 {
+		return fmt.Errorf("No text/plain in subscribe message")
+	}
+	lines := strings.Split(body, "\n")
+	name := ""
+	email := ""
+	for _, line := range lines {
+		line := strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Name") {
+			name = line[7:]
+			continue
+		}
+		if strings.HasPrefix(line, "Email") {
+			email = line[8:]
+			continue
+		}
+
+	}
+
+	nameParts := strings.SplitN(name, " ", 2)
+	if len(nameParts) < 2 {
+		err = p.Subscribe(email, name, "")
+	} else {
+		err = p.Subscribe(email, nameParts[0], nameParts[1])
+	}
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "Error 1062") {
+			fmt.Println("Duplicate, Skip")
+		} else {
+			return err
+		}
+	}
+	p.MoveMessage(message, "INBOX", p.config.Labels["subscribe"])
+	return nil
+}
 
 func (p *Parser) HandleUnsubscribe(message *gmail.Message) error {
 
@@ -116,6 +168,8 @@ func (p *Parser) HandleUnsubscribe(message *gmail.Message) error {
 }
 
 func (p *Parser) MoveMessage(m *gmail.Message, from string, to string) {
+	log.Println("NOT MOVING MESSAGE")
+	return
 
 	req := &gmail.ModifyMessageRequest{
 		RemoveLabelIds: []string{from},
@@ -129,13 +183,43 @@ func (p *Parser) MoveMessage(m *gmail.Message, from string, to string) {
 	}
 }
 
+func (p *Parser) findHeader(m *gmail.Message, name string) (string, bool) {
+	name = strings.ToLower(name)
+	for _, h := range m.Payload.Headers {
+		if name == strings.ToLower(h.Name) {
+			return h.Value, true
+		}
+	}
+	return "", false
+}
+
 func (p *Parser) HandleDeliveryStatus(m *gmail.Message) error {
-	body, err := getMimePartString(m, "message/delivery-status")
+
+	addr = ""
+	if addr = p.tryXHeader(m); len(addr) > 0 {
+	} else if addr = p.tryDeliveryStatus(m); len(addr) > 0 {
+	} else if addr = p.tryPlaintext(m); len(addr) > 0 {
+	} else {
+		return fmt.Errorf("No method found an unsubscribe address")
+	}
+
+	p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
+	err := p.Undeliverable(failHeader)
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (p *parser) tryDeliveryStatus(m) string {
+	body, err := getMimePartString(m, "message/delivery-status")
+	if err != nil {
+		log.Println(err.Error)
+		return ""
+	}
 	if len(body) < 1 {
-		return fmt.Errorf("No delivery status part")
+		fmt.Println(body)
+		return ""
 	}
 	action := reStatusAction.FindStringSubmatch(body)
 	recipient := reStatusRecipient.FindStringSubmatch(body)
@@ -143,33 +227,64 @@ func (p *Parser) HandleDeliveryStatus(m *gmail.Message) error {
 		fmt.Println("PARSE FAIL ::::::::")
 		fmt.Println(body)
 		fmt.Println("PARSE FAIL ========")
-		return fmt.Errorf("=================================")
+		return "" //fmt.Errorf("=================================")
 	}
-	if action[1] == "failed" {
-		p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
-		err = p.Undeliverable(recipient[1])
+	return recipient[1]
+
+	//if action[1] == "failed" {
+
+	//p.MoveMessage(m, "INBOX", p.config.Labels["undeliverable"])
+	//err = p.Undeliverable(recipient[1])
+	//if err != nil {
+	//}
+	//}
+}
+
+func (p *parser) tryPlaintext(m *gmail.Message) string {
+	body, err = getMimePartString(m, "text/plain")
+	if err != nil {
+		fmt.Println(err.Error())
+		return ""
+	}
+
+}
+func (p *parser) tryXHeader(m *gmail.Message) string {
+
+	if failHeader, ok := p.findHeader(m, "X-Failed-Recipients"); ok {
+		return failHeader
+	}
+	return ""
+}
+
+func getMimePartFromPart(payload *gmail.MessagePart, mimeType string) (*gmail.MessagePart, error) {
+	fmt.Printf("MIME: '%s'\n", payload.MimeType)
+	if payload.MimeType == mimeType {
+		return payload, nil
+	}
+	for _, part := range payload.Parts {
+		rp, err := getMimePartFromPart(part, mimeType)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if rp != nil {
+			return rp, nil
 		}
 	}
-	return nil
+	return nil, nil
+
 }
 
 func getMimePartString(message *gmail.Message, mimeType string) (string, error) {
-	if message.Payload.MimeType == mimeType {
-		bodyBytes, err := base64.URLEncoding.DecodeString(message.Payload.Body.Data)
-		return string(bodyBytes), err
+	payload, err := getMimePartFromPart(message.Payload, mimeType)
+	if err != nil {
+		return "", err
 	}
-	for _, part := range message.Payload.Parts {
-		if part.MimeType == mimeType {
-			if len(part.Parts) > 0 {
-				part = part.Parts[0]
-			}
-			bodyBytes, err := base64.URLEncoding.DecodeString(part.Body.Data)
-			return string(bodyBytes), err
-		}
+	if payload == nil {
+		return "", nil
 	}
-	return "", nil
+
+	bodyBytes, err := base64.URLEncoding.DecodeString(message.Payload.Body.Data)
+	return string(bodyBytes), err
 }
 
 var reReplyNewline *regexp.Regexp = regexp.MustCompile(`\n>[ ]*`)
@@ -186,7 +301,7 @@ func (p *Parser) GetMessages(listRequest *gmail.UsersMessagesListCall, msgCallba
 			if err != nil {
 				return err
 			}
-			fmt.Printf("GOT MESSAGE %s\n", message.Id)
+			fmt.Printf("GOT MESSAGE %s\n%s\n", message.Id, message.Snippet)
 			err = msgCallback(message)
 
 			if err != nil {

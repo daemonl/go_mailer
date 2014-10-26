@@ -17,6 +17,16 @@ func (p *Parser) Unsubscribe(addr string) error {
 	return p.DoAddress(addr, "unsubscribe")
 }
 
+func (p *Parser) Subscribe(addr string, first string, last string) error {
+	signup := time.Now().String()
+	fmt.Printf("Add '%s' '%s' <%s>\n", first, last, addr)
+	_, err := p.db.Exec(`INSERT INTO sendlist (email, first, last, signup) VALUES (?,?,?,?)`, addr, first, last, signup)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *Parser) DoAddress(addr, col string) error {
 	unique := time.Now().String()
 	res, err := p.db.Exec(fmt.Sprintf(`UPDATE sendlist SET %s = ? WHERE email = ?`, col), unique, addr)
