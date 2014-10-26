@@ -168,8 +168,8 @@ func (p *Parser) HandleUnsubscribe(message *gmail.Message) error {
 }
 
 func (p *Parser) MoveMessage(m *gmail.Message, from string, to string) {
-	log.Println("NOT MOVING MESSAGE")
-	return
+	//log.Println("NOT MOVING MESSAGE")
+	//return
 
 	req := &gmail.ModifyMessageRequest{
 		RemoveLabelIds: []string{from},
