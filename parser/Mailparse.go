@@ -39,6 +39,9 @@ func GetParser(config *Config) (*Parser, error) {
 	}
 
 	transport, err := goauthcli.GetTransport(oauthConfig, config.ServerBind)
+	if err != nil {
+		return nil, err
+	}
 
 	sv, err := gmail.New(transport.Client())
 	if err != nil {
@@ -234,15 +237,16 @@ func (p *Parser) tryDeliveryStatus(m *gmail.Message) string {
 
 func (p *Parser) tryPlaintext(m *gmail.Message) string {
 
-	body, err := getMimePartString(m, "text/plain")
+	body, err := getMimePartString(m.Payload, "text/plain")
 	if err != nil {
 		fmt.Println(err.Error())
 		return ""
 	}
 
 	if strings.HasPrefix(body, `Hi. This is the qmail-send program at`) {
+		fmt.Println("QMAIL")
 		addr := reQmailFailure.FindStringSubmatch(body)
-		if len(addr) > 1{
+		if len(addr) > 1 {
 			return addr[1]
 		}
 	}
